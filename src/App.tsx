@@ -16,12 +16,15 @@ export default function App() {
     status,
     isMuted,
     isSpeaking,
+    isRecordingTurn,
+    isProcessingTurn,
     audioLevel,
     error,
     transcript,
     connect,
     disconnect,
     toggleMute,
+    stopServerlessRecording,
     sendTextPrompt,
     clearTranscript,
   } = useLiveVoice();
@@ -30,9 +33,12 @@ export default function App() {
 
   const isActive = status === 'connected';
   const isConnecting = status === 'connecting';
+  const isVisualActive = isActive || isRecordingTurn || isSpeaking;
 
   const handlePrimaryVoiceAction = () => {
-    if (isActive || isConnecting) {
+    if (isRecordingTurn) {
+      stopServerlessRecording();
+    } else if (isActive || isConnecting) {
       disconnect();
     } else {
       connect();
@@ -82,9 +88,18 @@ export default function App() {
             <button
               type="button"
               onClick={handlePrimaryVoiceAction}
-              className="px-4 py-2 text-xs font-medium tracking-wide bg-[#1C1917] text-[#FAF7F2] rounded-md hover:bg-[#332E2A] transition-colors whitespace-nowrap shrink-0 cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#1C1917]"
+              disabled={isProcessingTurn}
+              className="px-4 py-2 text-xs font-medium tracking-wide bg-[#1C1917] text-[#FAF7F2] rounded-md hover:bg-[#332E2A] disabled:opacity-60 transition-colors whitespace-nowrap shrink-0 cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#1C1917]"
             >
-              {isActive ? 'End Session' : isConnecting ? 'Connecting...' : 'Speak with Lil'}
+              {isRecordingTurn
+                ? 'Stop & Send'
+                : isActive
+                  ? 'End Session'
+                  : isConnecting
+                    ? 'Connecting...'
+                    : isProcessingTurn
+                      ? 'Responding...'
+                      : 'Speak with Lil'}
             </button>
           </div>
         </div>
@@ -123,14 +138,19 @@ export default function App() {
                     <button
                       type="button"
                       onClick={handlePrimaryVoiceAction}
-                      disabled={isConnecting}
+                      disabled={isConnecting || isProcessingTurn}
                       className={`inline-flex items-center gap-2.5 px-5 py-2.5 text-sm font-medium rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#1C1917] ${
-                        isActive
+                        isActive || isRecordingTurn
                           ? 'bg-[#7F2D24] text-[#FAF7F2] hover:bg-[#69231B]'
                           : 'bg-[#1C1917] text-[#FAF7F2] hover:bg-[#332E2A] disabled:opacity-60'
                       }`}
                     >
-                      {isActive ? (
+                      {isRecordingTurn ? (
+                        <>
+                          <PhoneOff className="w-4 h-4" />
+                          <span>Stop &amp; send</span>
+                        </>
+                      ) : isActive ? (
                         <>
                           <PhoneOff className="w-4 h-4" />
                           <span>End conversation</span>
@@ -138,7 +158,13 @@ export default function App() {
                       ) : (
                         <>
                           <Mic className="w-4 h-4" />
-                          <span>{isConnecting ? 'Connecting to Lil...' : 'Start voice conversation'}</span>
+                          <span>
+                            {isConnecting
+                              ? 'Connecting to Lil...'
+                              : isProcessingTurn
+                                ? 'Lil is responding...'
+                                : 'Start voice conversation'}
+                          </span>
                         </>
                       )}
                     </button>
@@ -159,22 +185,26 @@ export default function App() {
                   {/* Subtle Live Audio Visualizer */}
                   <div className="flex items-center gap-3">
                     <span className="text-xs text-[#6B645C] whitespace-nowrap">
-                      {isActive
-                        ? isSpeaking
-                          ? 'Lil is speaking'
-                          : isMuted
-                            ? 'Microphone muted'
-                            : 'Listening'
-                        : isConnecting
-                          ? 'Preparing voice'
-                          : 'Ready in EN & FR'}
+                      {isRecordingTurn
+                        ? 'Listening — click Stop & send'
+                        : isProcessingTurn
+                          ? 'Thinking'
+                          : isSpeaking
+                            ? 'Lil is speaking'
+                            : isActive
+                              ? isMuted
+                                ? 'Microphone muted'
+                                : 'Listening'
+                              : isConnecting
+                                ? 'Preparing voice'
+                                : 'Ready in EN & FR'}
                     </span>
                     <div
                       className="flex items-center gap-1 h-6"
                       aria-hidden="true"
                     >
                       {WAVE_MULTIPLIERS.map((mult, idx) => {
-                        const heightPct = isActive
+                        const heightPct = isVisualActive
                           ? Math.max(18, Math.min(100, Math.round(audioLevel * 100 * mult) + 18))
                           : 18;
                         return (
@@ -182,7 +212,7 @@ export default function App() {
                             key={idx}
                             style={{ transform: `scaleY(${heightPct / 100})` }}
                             className={`w-[2px] h-6 rounded-full origin-center transition-transform duration-100 ${
-                              isActive ? 'bg-[#1C1917]' : 'bg-[#C9BFB0]'
+                              isVisualActive ? 'bg-[#1C1917]' : 'bg-[#C9BFB0]'
                             }`}
                           />
                         );

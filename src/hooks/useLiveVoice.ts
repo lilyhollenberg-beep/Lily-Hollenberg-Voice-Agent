@@ -60,10 +60,25 @@ function base64ToFloat32(base64: string): Float32Array {
   return float32;
 }
 
+function blobToBase64(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      const result = typeof reader.result === 'string' ? reader.result : '';
+      const commaIdx = result.indexOf(',');
+      resolve(commaIdx >= 0 ? result.slice(commaIdx + 1) : result);
+    };
+    reader.onerror = () => reject(new Error('Failed to read recorded audio.'));
+    reader.readAsDataURL(blob);
+  });
+}
+
 export function useLiveVoice() {
   const [status, setStatus] = useState<VoiceStatus>('idle');
   const [isMuted, setIsMuted] = useState(false);
   const [isSpeaking, setIsSpeaking] = useState(false);
+  const [isRecordingTurn, setIsRecordingTurn] = useState(false);
+  const [isProcessingTurn, setIsProcessingTurn] = useState(false);
   const [audioLevel, setAudioLevel] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [transcript, setTranscript] = useState<TranscriptEntry[]>([]);
@@ -78,6 +93,16 @@ export function useLiveVoice() {
   const nextStartTimeRef = useRef<number>(0);
   const isMutedRef = useRef<boolean>(false);
   const pendingPromptRef = useRef<string | null>(null);
+  const useServerlessRef = useRef<boolean>(false);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const recordedChunksRef = useRef<Blob[]>([]);
+  const htmlAudioRef = useRef<HTMLAudioElement | null>(null);
+  const transcriptRef = useRef<TranscriptEntry[]>([]);
+  const levelIntervalRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    transcriptRef.current = transcript;
+  }, [transcript]);
 
   const stopOutputPlayback = useCallback(() => {
     for (const src of activeSourcesRef.current) {
@@ -89,11 +114,35 @@ export function useLiveVoice() {
     }
     activeSourcesRef.current.clear();
     nextStartTimeRef.current = 0;
+
+    if (htmlAudioRef.current) {
+      htmlAudioRef.current.pause();
+      htmlAudioRef.current.src = '';
+      htmlAudioRef.current = null;
+    }
+    if (levelIntervalRef.current !== null) {
+      window.clearInterval(levelIntervalRef.current);
+      levelIntervalRef.current = null;
+    }
+
     setIsSpeaking(false);
+    setAudioLevel(0);
   }, []);
 
   const cleanup = useCallback(() => {
     stopOutputPlayback();
+
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+      try {
+        mediaRecorderRef.current.stop();
+      } catch {
+        // Ignore
+      }
+    }
+    mediaRecorderRef.current = null;
+    recordedChunksRef.current = [];
+    setIsRecordingTurn(false);
+    setIsProcessingTurn(false);
 
     if (processorRef.current) {
       processorRef.current.disconnect();
@@ -121,7 +170,10 @@ export function useLiveVoice() {
       wsRef.current.onmessage = null;
       wsRef.current.onerror = null;
       wsRef.current.onclose = null;
-      if (wsRef.current.readyState === WebSocket.OPEN || wsRef.current.readyState === WebSocket.CONNECTING) {
+      if (
+        wsRef.current.readyState === WebSocket.OPEN ||
+        wsRef.current.readyState === WebSocket.CONNECTING
+      ) {
         wsRef.current.close();
       }
       wsRef.current = null;
@@ -160,6 +212,165 @@ export function useLiveVoice() {
     });
   }, []);
 
+  const addFullTurn = useCallback((role: 'user' | 'lil', text: string) => {
+    if (!text.trim()) return;
+    setTranscript((prev) => [
+      ...prev,
+      {
+        id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+        role,
+        text: text.trim(),
+      },
+    ]);
+  }, []);
+
+  const playWavBase64 = useCallback(
+    async (base64: string, mimeType = 'audio/wav') => {
+      if (!base64) return;
+      stopOutputPlayback();
+      const audio = new Audio(`data:${mimeType};base64,${base64}`);
+      htmlAudioRef.current = audio;
+
+      audio.onplay = () => {
+        setIsSpeaking(true);
+        levelIntervalRef.current = window.setInterval(() => {
+          setAudioLevel(0.28 + Math.random() * 0.42);
+        }, 110);
+      };
+      audio.onended = () => {
+        stopOutputPlayback();
+      };
+      audio.onerror = () => {
+        stopOutputPlayback();
+      };
+
+      try {
+        await audio.play();
+      } catch {
+        stopOutputPlayback();
+      }
+    },
+    [stopOutputPlayback]
+  );
+
+  const sendServerlessTurn = useCallback(
+    async (payload: { text?: string; audio?: string; mimeType?: string }) => {
+      setError(null);
+      setIsProcessingTurn(true);
+      try {
+        const res = await fetch('/api/voice', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            ...payload,
+            history: transcriptRef.current.slice(-10).map((t) => ({
+              role: t.role,
+              text: t.text,
+            })),
+          }),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          throw new Error(data.error || 'Voice service request failed.');
+        }
+
+        if (payload.audio && data.userText) {
+          addFullTurn('user', data.userText);
+        }
+        if (data.replyText) {
+          addFullTurn('lil', data.replyText);
+        }
+        if (data.audioBase64) {
+          await playWavBase64(data.audioBase64, data.mimeType || 'audio/wav');
+        }
+      } catch (err: unknown) {
+        const message =
+          err instanceof Error ? err.message : 'Unable to reach voice service.';
+        setError(message);
+      } finally {
+        setIsProcessingTurn(false);
+      }
+    },
+    [addFullTurn, playWavBase64]
+  );
+
+  const startServerlessRecording = useCallback(async () => {
+    setError(null);
+    stopOutputPlayback();
+    try {
+      const stream =
+        streamRef.current ??
+        (await navigator.mediaDevices.getUserMedia({
+          audio: {
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true,
+          },
+        }));
+      streamRef.current = stream;
+
+      const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+        ? 'audio/webm;codecs=opus'
+        : MediaRecorder.isTypeSupported('audio/webm')
+          ? 'audio/webm'
+          : '';
+
+      const recorder = mimeType
+        ? new MediaRecorder(stream, { mimeType })
+        : new MediaRecorder(stream);
+
+      recordedChunksRef.current = [];
+      mediaRecorderRef.current = recorder;
+
+      recorder.ondataavailable = (ev) => {
+        if (ev.data.size > 0) {
+          recordedChunksRef.current.push(ev.data);
+        }
+      };
+
+      recorder.onstop = async () => {
+        setIsRecordingTurn(false);
+        if (levelIntervalRef.current !== null) {
+          window.clearInterval(levelIntervalRef.current);
+          levelIntervalRef.current = null;
+        }
+        setAudioLevel(0);
+
+        const blob = new Blob(recordedChunksRef.current, {
+          type: recorder.mimeType || 'audio/webm',
+        });
+        recordedChunksRef.current = [];
+        if (blob.size < 200) return;
+
+        const base64 = await blobToBase64(blob);
+        const cleanMime = (recorder.mimeType || 'audio/webm').split(';')[0];
+        await sendServerlessTurn({ audio: base64, mimeType: cleanMime });
+      };
+
+      recorder.start();
+      setIsRecordingTurn(true);
+      setStatus('idle');
+      levelIntervalRef.current = window.setInterval(() => {
+        setAudioLevel(0.2 + Math.random() * 0.45);
+      }, 120);
+    } catch (err: unknown) {
+      const message =
+        err instanceof Error && err.name === 'NotAllowedError'
+          ? 'Microphone access was denied. Please allow microphone permissions to speak with Lil.'
+          : err instanceof Error
+            ? err.message
+            : 'Unable to access microphone.';
+      setError(message);
+      setStatus('error');
+    }
+  }, [sendServerlessTurn, stopOutputPlayback]);
+
+  const stopServerlessRecording = useCallback(() => {
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
+      mediaRecorderRef.current.stop();
+    }
+  }, []);
+
   const playAudioChunk = useCallback((base64: string) => {
     const ctx = outputCtxRef.current;
     if (!ctx) return;
@@ -167,7 +378,6 @@ export function useLiveVoice() {
     const float32 = base64ToFloat32(base64);
     if (float32.length === 0) return;
 
-    // Compute RMS for output visualization
     let sum = 0;
     for (let i = 0; i < float32.length; i += 4) {
       sum += float32[i] * float32[i];
@@ -203,6 +413,17 @@ export function useLiveVoice() {
     async (initialPrompt?: string) => {
       if (status === 'connecting' || status === 'connected') return;
 
+      // If we already know WebSockets are unavailable (e.g. Vercel serverless), use HTTP voice mode directly
+      if (useServerlessRef.current) {
+        if (initialPrompt) {
+          addFullTurn('user', initialPrompt);
+          await sendServerlessTurn({ text: initialPrompt });
+        } else {
+          await startServerlessRecording();
+        }
+        return;
+      }
+
       setError(null);
       setStatus('connecting');
       if (initialPrompt) {
@@ -230,16 +451,44 @@ export function useLiveVoice() {
         const ws = new WebSocket(`${protocol}//${window.location.host}/live`);
         wsRef.current = ws;
 
+        let becameReady = false;
+        let fellBack = false;
+
+        const triggerServerlessFallback = () => {
+          if (fellBack || becameReady) return;
+          fellBack = true;
+          useServerlessRef.current = true;
+          const savedPrompt = pendingPromptRef.current;
+          pendingPromptRef.current = null;
+          cleanup();
+          setStatus('idle');
+          if (savedPrompt) {
+            addFullTurn('user', savedPrompt);
+            void sendServerlessTurn({ text: savedPrompt });
+          } else {
+            void startServerlessRecording();
+          }
+        };
+
+        const connectTimeout = window.setTimeout(() => {
+          if (!becameReady) {
+            triggerServerlessFallback();
+          }
+        }, 3000);
+
         ws.onmessage = (event) => {
           try {
             const msg = JSON.parse(event.data);
             if (msg.error) {
+              window.clearTimeout(connectTimeout);
               setError(msg.error);
               cleanup();
               setStatus('error');
               return;
             }
             if (msg.ready) {
+              becameReady = true;
+              window.clearTimeout(connectTimeout);
               setStatus('connected');
               if (pendingPromptRef.current) {
                 const promptToSend = pendingPromptRef.current;
@@ -270,14 +519,24 @@ export function useLiveVoice() {
         };
 
         ws.onerror = () => {
-          setError('Connection to voice service failed. Please try again.');
-          cleanup();
-          setStatus('error');
+          window.clearTimeout(connectTimeout);
+          if (!becameReady) {
+            triggerServerlessFallback();
+          } else {
+            setError('Connection to voice service interrupted. Please try again.');
+            cleanup();
+            setStatus('error');
+          }
         };
 
         ws.onclose = () => {
-          cleanup();
-          setStatus((prev) => (prev === 'error' ? 'error' : 'idle'));
+          window.clearTimeout(connectTimeout);
+          if (!becameReady) {
+            triggerServerlessFallback();
+          } else {
+            cleanup();
+            setStatus((prev) => (prev === 'error' ? 'error' : 'idle'));
+          }
         };
 
         const source = inputCtx.createMediaStreamSource(stream);
@@ -291,7 +550,6 @@ export function useLiveVoice() {
 
           const inputData = e.inputBuffer.getChannelData(0);
 
-          // Update subtle mic level when Lil is not speaking
           if (activeSourcesRef.current.size === 0) {
             let sum = 0;
             for (let i = 0; i < inputData.length; i += 8) {
@@ -320,7 +578,16 @@ export function useLiveVoice() {
         setStatus('error');
       }
     },
-    [status, cleanup, appendTranscript, playAudioChunk, stopOutputPlayback]
+    [
+      status,
+      cleanup,
+      appendTranscript,
+      addFullTurn,
+      playAudioChunk,
+      stopOutputPlayback,
+      sendServerlessTurn,
+      startServerlessRecording,
+    ]
   );
 
   const toggleMute = useCallback(() => {
@@ -336,11 +603,14 @@ export function useLiveVoice() {
       if (status === 'connected' && wsRef.current?.readyState === WebSocket.OPEN) {
         appendTranscript('user', text);
         wsRef.current.send(JSON.stringify({ text }));
+      } else if (useServerlessRef.current) {
+        addFullTurn('user', text);
+        void sendServerlessTurn({ text });
       } else if (status === 'idle' || status === 'error') {
-        connect(text);
+        void connect(text);
       }
     },
-    [status, appendTranscript, connect]
+    [status, appendTranscript, addFullTurn, sendServerlessTurn, connect]
   );
 
   const clearTranscript = useCallback(() => {
@@ -357,12 +627,15 @@ export function useLiveVoice() {
     status,
     isMuted,
     isSpeaking,
+    isRecordingTurn,
+    isProcessingTurn,
     audioLevel,
     error,
     transcript,
     connect,
     disconnect,
     toggleMute,
+    stopServerlessRecording,
     sendTextPrompt,
     clearTranscript,
   };
