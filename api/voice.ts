@@ -81,11 +81,12 @@ export default async function handler(
     return;
   }
 
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) {
+  const rawApiKey = process.env.GEMINI_API_KEY ?? '';
+  const apiKey = rawApiKey.trim().replace(/^["']|["']$/g, '');
+  if (!apiKey || apiKey === 'MY_GEMINI_API_KEY') {
     sendJson(res, 500, {
       error:
-        'GEMINI_API_KEY is not configured. Please add GEMINI_API_KEY in your environment variables.',
+        'GEMINI_API_KEY is missing or invalid. Please set a valid Gemini API key in your Vercel Environment Variables and redeploy.',
     });
     return;
   }

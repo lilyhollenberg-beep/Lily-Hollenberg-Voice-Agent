@@ -20,11 +20,12 @@ export default async (req: Request): Promise<Response> => {
     return jsonResponse(405, { error: 'Method not allowed' });
   }
 
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) {
+  const rawApiKey = process.env.GEMINI_API_KEY ?? '';
+  const apiKey = rawApiKey.trim().replace(/^["']|["']$/g, '');
+  if (!apiKey || apiKey === 'MY_GEMINI_API_KEY') {
     return jsonResponse(500, {
       error:
-        'GEMINI_API_KEY is not configured. Please add GEMINI_API_KEY in Netlify Site configuration > Environment variables.',
+        'GEMINI_API_KEY is missing or invalid. Please set a valid Gemini API key in Netlify Site configuration > Environment variables and redeploy.',
     });
   }
 
