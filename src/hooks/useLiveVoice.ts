@@ -269,7 +269,21 @@ export function useLiveVoice() {
             })),
           }),
         });
-        const data = await res.json();
+        const rawText = await res.text();
+        let data: {
+          error?: string;
+          userText?: string;
+          replyText?: string;
+          audioBase64?: string;
+          mimeType?: string;
+        } = {};
+        try {
+          data = rawText ? JSON.parse(rawText) : {};
+        } catch {
+          throw new Error(
+            'Voice service endpoint is unavailable. Please ensure the serverless function is deployed and GEMINI_API_KEY is set.'
+          );
+        }
         if (!res.ok) {
           throw new Error(data.error || 'Voice service request failed.');
         }
@@ -600,17 +614,17 @@ export function useLiveVoice() {
 
   const sendTextPrompt = useCallback(
     (text: string) => {
+      const trimmed = text.trim();
+      if (!trimmed) return;
       if (status === 'connected' && wsRef.current?.readyState === WebSocket.OPEN) {
-        appendTranscript('user', text);
-        wsRef.current.send(JSON.stringify({ text }));
-      } else if (useServerlessRef.current) {
-        addFullTurn('user', text);
-        void sendServerlessTurn({ text });
-      } else if (status === 'idle' || status === 'error') {
-        void connect(text);
+        appendTranscript('user', trimmed);
+        wsRef.current.send(JSON.stringify({ text: trimmed }));
+      } else {
+        addFullTurn('user', trimmed);
+        void sendServerlessTurn({ text: trimmed });
       }
     },
-    [status, appendTranscript, addFullTurn, sendServerlessTurn, connect]
+    [status, appendTranscript, addFullTurn, sendServerlessTurn]
   );
 
   const clearTranscript = useCallback(() => {

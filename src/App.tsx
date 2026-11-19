@@ -30,6 +30,7 @@ export default function App() {
   } = useLiveVoice();
 
   const [imgError, setImgError] = useState(false);
+  const [draftQuestion, setDraftQuestion] = useState('');
 
   const isActive = status === 'connected';
   const isConnecting = status === 'connecting';
@@ -233,15 +234,41 @@ export default function App() {
                 {/* Quick Bilingual Prompts */}
                 <div className="pt-5">
                   <p className="text-xs text-[#6B645C] mb-3">
-                    Or begin with a question in English or French
+                    Or ask Lil in English or French
                   </p>
+                  <form
+                    onSubmit={(e) => {
+                      e.preventDefault();
+                      if (!draftQuestion.trim() || isProcessingTurn) return;
+                      sendTextPrompt(draftQuestion);
+                      setDraftQuestion('');
+                    }}
+                    className="flex items-center gap-2 mb-3"
+                  >
+                    <input
+                      type="text"
+                      value={draftQuestion}
+                      onChange={(e) => setDraftQuestion(e.target.value)}
+                      placeholder="Type a question for Lil (EN / FR)..."
+                      aria-label="Type a question for Lil"
+                      className="flex-1 min-w-0 px-3.5 py-2 text-sm rounded-md bg-[#FAF7F2] border border-[#E7E0D5] text-[#1C1917] placeholder:text-[#8C7E6D] focus:outline-none focus:border-[#1C1917]"
+                    />
+                    <button
+                      type="submit"
+                      disabled={!draftQuestion.trim() || isProcessingTurn}
+                      className="px-4 py-2 text-sm font-medium rounded-md bg-[#1C1917] text-[#FAF7F2] hover:bg-[#332E2A] disabled:opacity-50 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                    >
+                      Ask
+                    </button>
+                  </form>
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
                     {STARTER_PROMPTS.map((item) => (
                       <button
                         key={item.label}
                         type="button"
+                        disabled={isProcessingTurn}
                         onClick={() => sendTextPrompt(item.prompt)}
-                        className="text-left px-3.5 py-2.5 rounded-md bg-[#FAF7F2] border border-[#E7E0D5] hover:border-[#C9BFB0] transition-colors cursor-pointer group"
+                        className="text-left px-3.5 py-2.5 rounded-md bg-[#FAF7F2] border border-[#E7E0D5] hover:border-[#C9BFB0] disabled:opacity-60 transition-colors cursor-pointer group"
                       >
                         <span className="text-[11px] font-medium text-[#8C7E6D] mr-2">
                           {item.lang}
