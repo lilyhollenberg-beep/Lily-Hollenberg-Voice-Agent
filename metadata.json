@@ -1,0 +1,6 @@
+{
+  "name": "Lil — Lily Hollenberg's Voice Assistant",
+  "description": "A minimalistic bilingual English and French voice assistant for Lily Hollenberg, M1 Luxury Communication & Media Strategy student in Paris.",
+  "requestFramePermissions": ["microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
